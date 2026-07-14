@@ -20,7 +20,7 @@ jobs:
         uses: olafurpg/setup-scala@v10
 
       - name: Setup Mill
-        uses: jodersky/setup-mill@master
+        uses: zhutmost/setup-mill@main
         with:
           mill-version: 0.12.17
 
