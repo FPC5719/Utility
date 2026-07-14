@@ -16,8 +16,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Setup Scala
-        uses: olafurpg/setup-scala@v10
+      - name: Setup Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - name: Setup Mill
         uses: zhutmost/setup-mill@main
