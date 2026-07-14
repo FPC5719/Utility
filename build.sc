@@ -6,13 +6,13 @@ import publish._
 import $file.`rocket-chip`.common
 import $file.`rocket-chip`.common
 import $file.`rocket-chip`.cde.common
-import $file.`rocket-chip`.hardfloat.build
+import $file.`rocket-chip`.hardfloat.common
 
 val defaultScalaVersion = "2.13.15"
 
 def defaultVersions = Map(
-  "chisel"        -> ivy"org.chipsalliance::chisel:7.0.0",
-  "chisel-plugin" -> ivy"org.chipsalliance:::chisel-plugin:7.0.0",
+  "chisel"        -> mvn"org.chipsalliance::chisel:7.13.0",
+  "chisel-plugin" -> mvn"org.chipsalliance:::chisel-plugin:7.13.0",
 )
 
 trait HasChisel extends ScalaModule {
@@ -39,12 +39,12 @@ object rocketchip extends `rocket-chip`.common.RocketChipModule with HasChisel {
   val rcPath = os.pwd / "rocket-chip"
   override def millSourcePath = rcPath
 
-  def mainargsIvy = ivy"com.lihaoyi::mainargs:0.7.0"
+  def mainargsIvy = mvn"com.lihaoyi::mainargs:0.7.0"
 
-  def json4sJacksonIvy = ivy"org.json4s::json4s-jackson:4.0.7"
+  def json4sJacksonIvy = mvn"org.json4s::json4s-jackson:4.0.7"
 
   object macros extends `rocket-chip`.common.MacrosModule with HasChisel {
-    def scalaReflectIvy = ivy"org.scala-lang:scala-reflect:${scalaVersion}"
+    def scalaReflectIvy = mvn"org.scala-lang:scala-reflect:${scalaVersion}"
   }
 
   object cde extends `rocket-chip`.cde.common.CDEModule with HasChisel {
