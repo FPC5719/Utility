@@ -15,6 +15,8 @@ def defaultVersions = Map(
   "chisel-plugin" -> mvn"org.chipsalliance:::chisel-plugin:7.13.0",
 )
 
+val pwd = os.Path(sys.env("MILL_WORKSPACE_ROOT"))
+
 trait HasChisel extends ScalaModule {
   def chiselModule: Option[ScalaModule] = None
 
@@ -24,19 +26,21 @@ trait HasChisel extends ScalaModule {
 
   def chiselPluginIvy: Option[Dep] = Some(defaultVersions("chisel-plugin"))
 
+  def sourcecodeIvy = mvn"com.lihaoyi::sourcecode:0.4.4"
+
   override def scalaVersion = defaultScalaVersion
 
   override def scalacOptions = super.scalacOptions() ++
     Agg("-language:reflectiveCalls", "-Ymacro-annotations", "-Ytasty-reader")
 
-  override def ivyDeps = super.ivyDeps() ++ Agg(chiselIvy.get)
+  override def ivyDeps = super.ivyDeps() ++ Agg(chiselIvy.get) ++ Agg(sourcecodeIvy)
 
   override def scalacPluginIvyDeps = super.scalacPluginIvyDeps() ++ Agg(chiselPluginIvy.get)
 }
 
 object rocketchip extends `rocket-chip`.common.RocketChipModule with HasChisel {
 
-  val rcPath = os.pwd / "rocket-chip"
+  val rcPath = pwd / "rocket-chip"
   override def millSourcePath = rcPath
 
   def mainargsIvy = mvn"com.lihaoyi::mainargs:0.7.0"
@@ -64,7 +68,7 @@ object rocketchip extends `rocket-chip`.common.RocketChipModule with HasChisel {
 }
 
 object utility extends SbtModule with HasChisel {
-  override def millSourcePath = os.pwd / "utility"
+  override def millSourcePath = pwd
 
   override def moduleDeps = super.moduleDeps ++ Seq(rocketchip)
 
