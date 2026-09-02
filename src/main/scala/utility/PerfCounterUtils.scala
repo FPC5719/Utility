@@ -18,12 +18,10 @@ package utility
 
 import chisel3._
 import chisel3.util._
-import chisel3.util.experimental.BoringUtils.tapAndRead
-import chisel3.reflect.DataMirror.isVisible
+import chisel3.util.experimental.ExposureUtils
 import chisel3.experimental.BaseModule
 import org.chipsalliance.cde.config.{Field, Parameters}
 
-import scala.collection.mutable.ListBuffer
 import XSPerfLevel.XSPerfLevel
 
 case object PerfCounterOptionsKey extends Field[PerfCounterOptions]
@@ -56,27 +54,109 @@ trait HasRegularPerfName {
   }
 }
 
-object XSPerfAccumulate extends HasRegularPerfName with XSLogTap {
-  private val perfInfos = ListBuffer.empty[(Option[BaseModule], String, UInt)]
+private[utility] sealed trait XSPerfInfo extends ExposureTag {
+  def curMod: Option[BaseModule]
+  def perfName: String
+}
+
+private[utility] final case class XSPerfAccumulateInfo(curMod: Option[BaseModule], perfName: String)
+    extends XSPerfInfo
+
+private[utility] final case class XSPerfReferenceInfo(curMod: Option[BaseModule], perfName: String)
+    extends XSPerfInfo
+
+private[utility] final case class XSPerfHistogramInfo(
+  curMod: Option[BaseModule],
+  perfName: String,
+  start: Int,
+  stop: Int,
+  step: Int,
+  leftStrict: Boolean,
+  rightStrict: Boolean
+) extends XSPerfInfo
+
+private[utility] final case class XSPerfMaxInfo(curMod: Option[BaseModule], perfName: String)
+    extends XSPerfInfo
+
+private[utility] final class XSPerfEvent(private val gen: UInt) extends Bundle {
+  val value = gen.cloneType
+  val enable = Bool()
+}
+
+private[utility] object XSPerfEvent {
+  def apply(value: UInt, enable: Bool): XSPerfEvent = {
+    val event = Wire(new XSPerfEvent(chiselTypeOf(value)))
+    event.value := value
+    event.enable := enable
+    event
+  }
+}
+
+/** An instance-local route allocated where upward performance-counter exposures are collected. */
+private[utility] final class XSPerfHandle(private[utility] val dataType: Data) extends ExposureTag
+
+private[utility] final case class XSPerfRoute(info: XSPerfInfo, handle: XSPerfHandle)
+
+private[utility] object XSPerfRouter extends XSLogTap {
+  final case class Plan(routes: Seq[XSPerfRoute], sources: Map[XSPerfHandle, Data])
+
+  def prepare(): Plan = {
+    val routed = ExposureUtils.collect[XSPerfInfo]().map { case (info, source) =>
+      val handle = new XSPerfHandle(chiselTypeOf(source))
+      (XSPerfRoute(info, handle), handle -> source)
+    }
+    Plan(routed.map(_._1), routed.map(_._2).toMap)
+  }
+
+  def emit(routes: Seq[XSPerfRoute], ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
+    routes.foreach { route =>
+      val data = tapOrGet(route.handle)
+      route.info match {
+        case info: XSPerfAccumulateInfo =>
+          XSPerfAccumulate.collect(info, data.asInstanceOf[UInt], ctrl)
+        case info: XSPerfReferenceInfo =>
+          XSPerfReference.collect(info, data.asInstanceOf[UInt], ctrl)
+        case info: XSPerfHistogramInfo =>
+          XSPerfHistogram.collect(info, data.asInstanceOf[XSPerfEvent], ctrl)
+        case info: XSPerfMaxInfo =>
+          XSPerfMax.collect(info, data.asInstanceOf[XSPerfEvent], ctrl)
+      }
+    }
+  }
+
+  def connect(plan: Plan): Unit = {
+    val sinks = ExposureUtils.collect[XSPerfHandle]().groupMap(_._1)(_._2)
+    require(sinks.keySet == plan.sources.keySet, "PerfCounter exposure routes did not meet at their collection point")
+    plan.sources.foreach { case (handle, source) =>
+      val handleSinks = sinks(handle)
+      require(handleSinks.size == 1, s"PerfCounter exposure route has ${handleSinks.size} sinks, expected one")
+      handleSinks.head := source
+    }
+  }
+}
+
+object XSPerfAccumulate extends HasRegularPerfName {
   def apply(perfName: String, perfCnt: UInt, perfLevel: XSPerfLevel = XSPerfLevel.VERBOSE)
            (implicit p: Parameters): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
-      if(perfInfos.isEmpty) XSLog.registerCaller(collect)
-      perfInfos += ((chisel3.XSCompatibility.currentModule, perfName, perfCnt))
+      ExposureUtils.expose(
+        XSPerfAccumulateInfo(chisel3.XSCompatibility.currentModule, perfName),
+        isUpward = true,
+        perfCnt
+      )
     }
   }
-  def collect(ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
-    perfInfos.foreach { case (curMod, perfName, perfCnt_bore) =>
-      val perfCnt = tapOrGet(perfCnt_bore)
-      val perfClean = ctrl.clean
-      val perfDump = ctrl.dump
-      val counter = RegInit(0.U(64.W)).suggestName(perfName + "Counter")
-      val next_counter = WireInit(0.U(64.W)).suggestName(perfName + "Next")
-      next_counter := counter + perfCnt
-      counter := Mux(perfClean, 0.U, next_counter)
-      XSPerfPrint(curMod)(perfDump, p"$perfName, $next_counter\n")
-    }
+
+  private[utility] def collect(info: XSPerfAccumulateInfo, perfCnt: UInt, ctrl: LogPerfIO)
+                              (implicit p: Parameters): Unit = {
+    val perfClean = ctrl.clean
+    val perfDump = ctrl.dump
+    val counter = RegInit(0.U(64.W)).suggestName(info.perfName + "Counter")
+    val next_counter = WireInit(0.U(64.W)).suggestName(info.perfName + "Next")
+    next_counter := counter + perfCnt
+    counter := Mux(perfClean, 0.U, next_counter)
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}, $next_counter\n")
   }
 }
 
@@ -151,32 +231,32 @@ object XSPerfSeqAccumulate {
   }
 }
 
-object XSPerfReference extends HasRegularPerfName with XSLogTap {
-  private val perfInfos = ListBuffer.empty[(Option[BaseModule], String, UInt)]
+object XSPerfReference extends HasRegularPerfName {
   def apply(perfName: String, perfOut: UInt, perfLevel: XSPerfLevel = XSPerfLevel.VERBOSE)
            (implicit p: Parameters): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
-      if(perfInfos.isEmpty) XSLog.registerCaller(collect)
-      perfInfos += ((chisel3.XSCompatibility.currentModule, perfName, perfOut))
+      ExposureUtils.expose(
+        XSPerfReferenceInfo(chisel3.XSCompatibility.currentModule, perfName),
+        isUpward = true,
+        perfOut
+      )
     }
   }
-  def collect(ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
-    perfInfos.foreach { case (curMod, perfName, perfOut_bore) =>
-      val perfOut = tapOrGet(perfOut_bore)
-      val perfDump = ctrl.dump
-      val valueOut = WireInit(0.U(64.W)).suggestName(perfName + "Out")
-      valueOut := perfOut
 
-      XSPerfPrint(curMod)(perfDump, p"$perfName, $valueOut\n")
-    }
+  private[utility] def collect(info: XSPerfReferenceInfo, perfOut: UInt, ctrl: LogPerfIO)
+                              (implicit p: Parameters): Unit = {
+    val perfDump = ctrl.dump
+    val valueOut = WireInit(0.U(64.W)).suggestName(info.perfName + "Out")
+    valueOut := perfOut
+
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}, $valueOut\n")
   }
 }
 
-object XSPerfHistogram extends HasRegularPerfName with XSLogTap {
+object XSPerfHistogram extends HasRegularPerfName {
   // instead of simply accumulating counters
   // this function draws a histogram
-  private val perfHistInfos = ListBuffer.empty[(Option[BaseModule], String, UInt, Bool, Int, Int, Int, Boolean, Boolean)]
   def apply
   (
     perfName: String,
@@ -192,104 +272,116 @@ object XSPerfHistogram extends HasRegularPerfName with XSLogTap {
   (implicit p: Parameters): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
-      if(perfHistInfos.isEmpty) XSLog.registerCaller(collect)
-      perfHistInfos += ((chisel3.XSCompatibility.currentModule, perfName, perfCnt, enable, start, stop, step, left_strict, right_strict))
+      ExposureUtils.expose(
+        XSPerfHistogramInfo(
+          chisel3.XSCompatibility.currentModule,
+          perfName,
+          start,
+          stop,
+          step,
+          left_strict,
+          right_strict
+        ),
+        isUpward = true,
+        XSPerfEvent(perfCnt, enable)
+      )
     }
   }
-  def collect(ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
-    perfHistInfos.foreach{ case (curMod, perfName, perfCnt_bore, enable_bore, start, stop, step, left_strict, right_strict) =>
-      val perfCnt = tapOrGet(perfCnt_bore)
-      val enable = tapOrGet(enable_bore)
-      val perfClean = ctrl.clean
-      val perfDump = ctrl.dump
 
-      val sum = RegInit(0.U(64.W)).suggestName(perfName + "Sum")
-      val nSamples = RegInit(0.U(64.W)).suggestName(perfName + "NSamples")
-      val underflow = RegInit(0.U(64.W)).suggestName(perfName + "Underflow")
-      val overflow = RegInit(0.U(64.W)).suggestName(perfName + "Overflow")
+  private[utility] def collect(info: XSPerfHistogramInfo, event: XSPerfEvent, ctrl: LogPerfIO)
+                              (implicit p: Parameters): Unit = {
+    val perfCnt = event.value
+    val enable = event.enable
+    val perfClean = ctrl.clean
+    val perfDump = ctrl.dump
+
+    val sum = RegInit(0.U(64.W)).suggestName(info.perfName + "Sum")
+    val nSamples = RegInit(0.U(64.W)).suggestName(info.perfName + "NSamples")
+    val underflow = RegInit(0.U(64.W)).suggestName(info.perfName + "Underflow")
+    val overflow = RegInit(0.U(64.W)).suggestName(info.perfName + "Overflow")
+    when (perfClean) {
+      sum := 0.U
+      nSamples := 0.U
+      underflow := 0.U
+      overflow := 0.U
+    } .elsewhen (enable) {
+      sum := sum + perfCnt
+      nSamples := nSamples + 1.U
+      when (perfCnt < info.start.U) {
+        underflow := underflow + 1.U
+      }
+      when (perfCnt >= info.stop.U) {
+        overflow := overflow + 1.U
+      }
+    }
+
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_sum, ${sum}\n")
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_mean, ${sum/nSamples}\n")
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_sampled, ${nSamples}\n")
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_underflow, ${underflow}\n")
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_overflow, ${overflow}\n")
+
+    // drop each perfCnt value into a bin
+    val nBins = (info.stop - info.start) / info.step
+    require(info.start >= 0)
+    require(info.stop > info.start)
+    require(nBins > 0)
+
+    (0 until nBins) map { i =>
+      val binRangeStart = info.start + i * info.step
+      val binRangeStop = info.start + (i + 1) * info.step
+      val inRange = perfCnt >= binRangeStart.U && perfCnt < binRangeStop.U
+
+      // if perfCnt < start, it will go to the first bin
+      val leftOutOfRange = if(info.leftStrict)
+        false.B
+      else
+        perfCnt < info.start.U && i.U === 0.U
+      // if perfCnt >= stop, it will go to the last bin
+      val rightOutOfRange = if(info.rightStrict)
+        false.B
+      else
+        perfCnt >= info.stop.U && i.U === (nBins - 1).U
+      val inc = inRange || leftOutOfRange || rightOutOfRange
+
+      val histName = s"${info.perfName}_${binRangeStart}_${binRangeStop}"
+      val counter = RegInit(0.U(64.W)).suggestName(histName)
       when (perfClean) {
-        sum := 0.U
-        nSamples := 0.U
-        underflow := 0.U
-        overflow := 0.U
-      } .elsewhen (enable) {
-        sum := sum + perfCnt
-        nSamples := nSamples + 1.U
-        when (perfCnt < start.U) {
-          underflow := underflow + 1.U
-        }
-        when (perfCnt >= stop.U) {
-          overflow := overflow + 1.U
-        }
+        counter := 0.U
+      } .elsewhen(enable && inc) {
+        counter := counter + 1.U
       }
 
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_sum, ${sum}\n")
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_mean, ${sum/nSamples}\n")
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_sampled, ${nSamples}\n")
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_underflow, ${underflow}\n")
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_overflow, ${overflow}\n")
-
-      // drop each perfCnt value into a bin
-      val nBins = (stop - start) / step
-      require(start >= 0)
-      require(stop > start)
-      require(nBins > 0)
-
-      (0 until nBins) map { i =>
-        val binRangeStart = start + i * step
-        val binRangeStop = start + (i + 1) * step
-        val inRange = perfCnt >= binRangeStart.U && perfCnt < binRangeStop.U
-
-        // if perfCnt < start, it will go to the first bin
-        val leftOutOfRange = if(left_strict)
-          false.B
-        else
-          perfCnt < start.U && i.U === 0.U
-        // if perfCnt >= stop, it will go to the last bin
-        val rightOutOfRange = if(right_strict)
-          false.B
-        else
-          perfCnt >= stop.U && i.U === (nBins - 1).U
-        val inc = inRange || leftOutOfRange || rightOutOfRange
-
-        val histName = s"${perfName}_${binRangeStart}_${binRangeStop}"
-        val counter = RegInit(0.U(64.W)).suggestName(histName)
-        when (perfClean) {
-          counter := 0.U
-        } .elsewhen(enable && inc) {
-          counter := counter + 1.U
-        }
-
-        XSPerfPrint(curMod)(perfDump, p"${histName}, $counter\n")
-      }
+      XSPerfPrint(info.curMod)(perfDump, p"${histName}, $counter\n")
     }
   }
 }
 
-object XSPerfMax extends HasRegularPerfName with XSLogTap {
-  private val perfMaxInfos = ListBuffer.empty[(Option[BaseModule], String, UInt, Bool)]
+object XSPerfMax extends HasRegularPerfName {
   def apply(perfName: String, perfCnt: UInt, enable: Bool, perfLevel: XSPerfLevel = XSPerfLevel.VERBOSE)
            (implicit p: Parameters): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
-      if(perfMaxInfos.isEmpty) XSLog.registerCaller(collect)
-      perfMaxInfos += ((chisel3.XSCompatibility.currentModule, perfName, perfCnt, enable))
+      ExposureUtils.expose(
+        XSPerfMaxInfo(chisel3.XSCompatibility.currentModule, perfName),
+        isUpward = true,
+        XSPerfEvent(perfCnt, enable)
+      )
     }
   }
 
-  def collect(ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
-    perfMaxInfos.foreach{ case (curMod, perfName, perfCnt_bore, enable_bore) =>
-      val perfCnt = tapOrGet(perfCnt_bore)
-      val enable = tapOrGet(enable_bore)
-      val perfClean = ctrl.clean
-      val perfDump = ctrl.dump
+  private[utility] def collect(info: XSPerfMaxInfo, event: XSPerfEvent, ctrl: LogPerfIO)
+                              (implicit p: Parameters): Unit = {
+    val perfCnt = event.value
+    val enable = event.enable
+    val perfClean = ctrl.clean
+    val perfDump = ctrl.dump
 
-      val max = RegInit(0.U(64.W))
-      val next_max = Mux(enable && (perfCnt > max), perfCnt, max)
-      max := Mux(perfClean, 0.U, next_max)
+    val max = RegInit(0.U(64.W))
+    val next_max = Mux(enable && (perfCnt > max), perfCnt, max)
+    max := Mux(perfClean, 0.U, next_max)
 
-      XSPerfPrint(curMod)(perfDump, p"${perfName}_max, $next_max\n")
-    }
+    XSPerfPrint(info.curMod)(perfDump, p"${info.perfName}_max, $next_max\n")
   }
 }
 
