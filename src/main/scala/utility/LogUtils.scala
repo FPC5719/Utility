@@ -18,6 +18,7 @@ package utility
 
 import chisel3._
 import chisel3.reflect.DataMirror.isVisible
+import chisel3.util.experimental.ExposureUtils
 import chisel3.util.experimental.BoringUtils.{bore, tapAndRead}
 import chisel3.experimental.BaseModule
 import org.chipsalliance.cde.config.{Field, Parameters}
@@ -64,6 +65,12 @@ class LogPerfIO extends Bundle {
 }
 
 private[utility] trait XSLogTap {
+  def tapOrGet(handle: XSPerfHandle): Data = {
+    val sink = Wire(handle.dataType.cloneType)
+    ExposureUtils.expose(handle, isUpward = false, sink)
+    sink
+  }
+
   def tapOrGet[T <: Data](data: T)(implicit p: Parameters): T = {
     if (isVisible(data))
       data
@@ -107,7 +114,7 @@ object XSLog extends XSLogTap {
     logInfos.toSeq.map { info =>
       info.copy(
         cond = tapOrGet(info.cond),
-        data = info.data.map(tapOrGet _)
+        data = info.data.map(data => tapOrGet(data))
       )
     }
   }
@@ -143,8 +150,10 @@ object XSLog extends XSLogTap {
   }
 
   def collect(ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
-    val logEndpoint = Module(new LogPerfEndpoint())
+    val perfPlan = XSPerfRouter.prepare()
+    val logEndpoint = Module(new LogPerfEndpoint(perfPlan.routes))
     logEndpoint.io := ctrl
+    XSPerfRouter.connect(perfPlan)
   }
 
   def collect(timer: UInt, logEnable: Bool, clean: Bool, dump: Bool)(implicit p: Parameters): Unit = {
@@ -156,8 +165,7 @@ object XSLog extends XSLogTap {
     collect(ctrl)
   }
 
-  // As XSPerf depends on LogPerfIO, their apply will be buffered until collection
-  // Register collect() method from Callers when first apply, then call that during collection
+  // Utilities that depend on LogPerfIO may defer hardware generation until collection.
   def registerCaller(caller: LogPerfIO => Unit): Unit = callBacks += caller
   def registerCallerWithClock(caller: (LogPerfIO, Reset, Clock) => Unit): Unit = callBacksWithClock += caller
   def invokeCaller(ctrl: LogPerfIO): Unit = callBacks.foreach(caller => caller(ctrl))
@@ -195,7 +203,7 @@ object XSWarn extends LogHelper(XSLogLevel.WARN)
 
 object XSError extends LogHelper(XSLogLevel.ERROR)
 
-private class LogPerfEndpoint()(implicit p: Parameters) extends Module {
+private class LogPerfEndpoint(perfRoutes: Seq[XSPerfRoute])(implicit p: Parameters) extends Module {
   val io = IO(Input(new LogPerfIO))
   def concatAndPrint(infos: Seq[LogPerfParam]): Unit = {
     infos.grouped(1000).foreach { infos =>
@@ -207,9 +215,10 @@ private class LogPerfEndpoint()(implicit p: Parameters) extends Module {
     }
   }
 
-  // To collect deferred call from XSPerf/..., invoke all registered caller
+  // Invoke legacy deferred collectors, then materialize the routed performance counters.
   XSLog.invokeCallerWithClock(io, reset, clock)
   XSLog.invokeCaller(io)
+  XSPerfRouter.emit(perfRoutes, io)
   // Group printfs with same cond to reduce system tasks for better thread schedule
   XSLog.tapInfos.groupBy(_.cond).values.foreach { infos =>
     val cond = infos.head.cond
