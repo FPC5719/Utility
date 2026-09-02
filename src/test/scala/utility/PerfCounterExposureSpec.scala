@@ -72,6 +72,7 @@ class PerfCounterExposureSpec extends AnyFlatSpec with Matchers {
     declarationCount(chirrtl, "regreset", "exposureHistSum") shouldBe 2
     declarationCount(chirrtl, "regreset", "exposureHist_0_1") shouldBe 2
     declarationCount(chirrtl, "regreset", "max") shouldBe 2
+    "exposureAcc, %d".r.findAllMatchIn(chirrtl).size shouldBe 2
     raw"(?m)^\s*input x_data(?:_\d+)?\s*:".r.findAllMatchIn(chirrtl).size shouldBe 8
     sourceConnectionCount(chirrtl, "source0") shouldBe 6
     sourceConnectionCount(chirrtl, "source1") shouldBe 6
