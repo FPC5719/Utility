@@ -93,7 +93,7 @@ private[utility] object XSPerfEvent {
 }
 
 /** An instance-local route allocated where upward performance-counter exposures are collected. */
-private[utility] final class XSPerfHandle(private[utility] val dataType: Data) extends ExposureTag
+private[utility] final class XSPerfHandle(val dataType: Data) extends XSExposureHandle
 
 private[utility] final case class XSPerfRoute(info: XSPerfInfo, handle: XSPerfHandle)
 
