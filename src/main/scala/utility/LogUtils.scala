@@ -56,7 +56,7 @@ case class LogPerfParam (
   moduleTag: String
 )
 
-private[utility] final case class XSLogInfo(
+private final case class XSLogInfo(
   debugLevel: XSLogLevel,
   prefix: Boolean,
   fmt: String,
@@ -66,18 +66,18 @@ private[utility] final case class XSLogInfo(
   site: XSLogSite
 ) extends ExposureTag
 
-private[utility] final class XSLogCondition
+private final class XSLogCondition
 
-private[utility] final class XSLogSite
+private final class XSLogSite
 
-private[utility] final case class XSLogGroup(condition: XSLogCondition, occurrence: Int)
+private final case class XSLogGroup(condition: XSLogCondition, occurrence: Int)
 
-private[utility] final class XSLogEvent(private val dataTypes: Seq[Data]) extends Bundle {
+private final class XSLogEvent(private val dataTypes: Seq[Data]) extends Bundle {
   val cond = Bool()
   val data = MixedVec(dataTypes.map(_.cloneType))
 }
 
-private[utility] object XSLogEvent {
+private object XSLogEvent {
   def apply(cond: Bool, data: Seq[Data]): XSLogEvent = {
     val event = Wire(new XSLogEvent(data.map(x => chiselTypeOf(x))))
     event.cond := cond
@@ -93,27 +93,13 @@ class LogPerfIO extends Bundle {
   val dump = Bool()
 }
 
-private[utility] trait XSExposureHandle extends ExposureTag {
-  def dataType: Data
-}
+private final class XSLogHandle(dataType: Data) extends XSExposureHandle(dataType)
 
-private[utility] trait XSLogTap {
-  def tapOrGet(handle: XSExposureHandle): Data = {
-    val sink = Wire(handle.dataType.cloneType)
-    ExposureUtils.expose(handle, isUpward = false, sink)
-    sink
-  }
-}
+private final case class XSLogRoute(info: XSLogInfo, handle: XSLogHandle, group: XSLogGroup)
 
-private[utility] final class XSLogHandle(val dataType: Data) extends XSExposureHandle
+private final case class XSLogEntry(param: LogPerfParam, group: XSLogGroup)
 
-private[utility] final case class XSLogRoute(info: XSLogInfo, handle: XSLogHandle, group: XSLogGroup)
-
-private[utility] final case class XSLogEntry(param: LogPerfParam, group: XSLogGroup)
-
-private[utility] object XSLogRouter extends XSLogTap {
-  final case class Plan(routes: Seq[XSLogRoute], sources: Map[XSLogHandle, Data])
-
+private object XSLogRouter {
   private def groupSources(sources: Seq[(XSLogInfo, Data)]): Seq[(XSLogInfo, Data, XSLogGroup)] = {
     val seen = scala.collection.mutable.Map.empty[(XSLogCondition, XSLogSite), Int].withDefaultValue(0)
 
@@ -133,17 +119,17 @@ private[utility] object XSLogRouter extends XSLogTap {
     )
   }
 
-  def prepare(): Plan = {
+  def prepare(): XSExposurePlan[XSLogHandle, XSLogRoute] = {
     val routed = groupSources(ExposureUtils.collect[XSLogInfo]()).map { case (info, source, group) =>
       val handle = new XSLogHandle(chiselTypeOf(source))
       val routedInfo = info.copy(moduleTag = XSLog.routedModuleTag(info.module, source))
       (XSLogRoute(routedInfo, handle, group), handle -> source)
     }
-    Plan(routed.map(_._1), routed.map(_._2).toMap)
+    XSExposurePlan(routed.map(_._1), routed.map(_._2).toMap)
   }
 
   def emit(routes: Seq[XSLogRoute]): Seq[XSLogEntry] = {
-    routes.map(route => materialize(route.info, tapOrGet(route.handle), route.group))
+    routes.map(route => materialize(route.info, XSExposureBridge.sinkFor(route.handle), route.group))
   }
 
   def collectLocal(): Seq[XSLogEntry] = {
@@ -152,15 +138,7 @@ private[utility] object XSLogRouter extends XSLogTap {
     }
   }
 
-  def connect(plan: Plan): Unit = {
-    val sinks = ExposureUtils.collect[XSLogHandle]().groupMap(_._1)(_._2)
-    require(sinks.keySet == plan.sources.keySet, "Log exposure routes did not meet at their collection point")
-    plan.sources.foreach { case (handle, source) =>
-      val handleSinks = sinks(handle)
-      require(handleSinks.size == 1, s"Log exposure route has ${handleSinks.size} sinks, expected one")
-      handleSinks.head := source
-    }
-  }
+  def connect(plan: XSExposurePlan[XSLogHandle, XSLogRoute]): Unit = XSExposureBridge.connect(plan, "Log")
 }
 
 object XSLog {
@@ -182,7 +160,7 @@ object XSLog {
     }
   }
 
-  private[utility] def routedModuleTag(origin: BaseModule, source: Data): String = {
+  def routedModuleTag(origin: BaseModule, source: Data): String = {
     val token = s"__XSLOG_MODULE_${nextRoutedModuleTag}__"
     nextRoutedModuleTag += 1
     routedModuleTags(token) = { () =>

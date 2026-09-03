@@ -54,36 +54,44 @@ trait HasRegularPerfName {
   }
 }
 
-private[utility] sealed trait XSPerfInfo extends ExposureTag {
+private sealed trait XSPerfInfo extends ExposureTag {
   def curMod: Option[BaseModule]
   def perfName: String
 }
 
-private[utility] final case class XSPerfAccumulateInfo(curMod: Option[BaseModule], perfName: String)
-    extends XSPerfInfo
+private object XSPerfInfo {
+  final case class Accumulate(
+    curMod: Option[BaseModule],
+    perfName: String
+  ) extends XSPerfInfo
 
-private[utility] final case class XSPerfReferenceInfo(curMod: Option[BaseModule], perfName: String)
-    extends XSPerfInfo
+  final case class Reference(
+    curMod: Option[BaseModule],
+    perfName: String
+  ) extends XSPerfInfo
 
-private[utility] final case class XSPerfHistogramInfo(
-  curMod: Option[BaseModule],
-  perfName: String,
-  start: Int,
-  stop: Int,
-  step: Int,
-  leftStrict: Boolean,
-  rightStrict: Boolean
-) extends XSPerfInfo
+  final case class Histogram(
+    curMod: Option[BaseModule],
+    perfName: String,
+    start: Int,
+    stop: Int,
+    step: Int,
+    leftStrict: Boolean,
+    rightStrict: Boolean
+  ) extends XSPerfInfo
 
-private[utility] final case class XSPerfMaxInfo(curMod: Option[BaseModule], perfName: String)
-    extends XSPerfInfo
+  final case class Max(
+    curMod: Option[BaseModule],
+    perfName: String
+  ) extends XSPerfInfo
+}
 
-private[utility] final class XSPerfEvent(private val gen: UInt) extends Bundle {
+private final class XSPerfEvent(private val gen: UInt) extends Bundle {
   val value = gen.cloneType
   val enable = Bool()
 }
 
-private[utility] object XSPerfEvent {
+private object XSPerfEvent {
   def apply(value: UInt, enable: Bool): XSPerfEvent = {
     val event = Wire(new XSPerfEvent(chiselTypeOf(value)))
     event.value := value
@@ -93,46 +101,36 @@ private[utility] object XSPerfEvent {
 }
 
 /** An instance-local route allocated where upward performance-counter exposures are collected. */
-private[utility] final class XSPerfHandle(val dataType: Data) extends XSExposureHandle
+private final class XSPerfHandle(dataType: Data) extends XSExposureHandle(dataType)
 
-private[utility] final case class XSPerfRoute(info: XSPerfInfo, handle: XSPerfHandle)
+private final case class XSPerfRoute(info: XSPerfInfo, handle: XSPerfHandle)
 
-private[utility] object XSPerfRouter extends XSLogTap {
-  final case class Plan(routes: Seq[XSPerfRoute], sources: Map[XSPerfHandle, Data])
-
-  def prepare(): Plan = {
+private object XSPerfRouter {
+  def prepare(): XSExposurePlan[XSPerfHandle, XSPerfRoute] = {
     val routed = ExposureUtils.collect[XSPerfInfo]().map { case (info, source) =>
       val handle = new XSPerfHandle(chiselTypeOf(source))
       (XSPerfRoute(info, handle), handle -> source)
     }
-    Plan(routed.map(_._1), routed.map(_._2).toMap)
+    XSExposurePlan(routed.map(_._1), routed.map(_._2).toMap)
   }
 
   def emit(routes: Seq[XSPerfRoute], ctrl: LogPerfIO)(implicit p: Parameters): Unit = {
     routes.foreach { route =>
-      val data = tapOrGet(route.handle)
+      val data = XSExposureBridge.sinkFor(route.handle)
       route.info match {
-        case info: XSPerfAccumulateInfo =>
+        case info: XSPerfInfo.Accumulate =>
           XSPerfAccumulate.collect(info, data.asInstanceOf[UInt], ctrl)
-        case info: XSPerfReferenceInfo =>
+        case info: XSPerfInfo.Reference =>
           XSPerfReference.collect(info, data.asInstanceOf[UInt], ctrl)
-        case info: XSPerfHistogramInfo =>
+        case info: XSPerfInfo.Histogram =>
           XSPerfHistogram.collect(info, data.asInstanceOf[XSPerfEvent], ctrl)
-        case info: XSPerfMaxInfo =>
+        case info: XSPerfInfo.Max =>
           XSPerfMax.collect(info, data.asInstanceOf[XSPerfEvent], ctrl)
       }
     }
   }
 
-  def connect(plan: Plan): Unit = {
-    val sinks = ExposureUtils.collect[XSPerfHandle]().groupMap(_._1)(_._2)
-    require(sinks.keySet == plan.sources.keySet, "PerfCounter exposure routes did not meet at their collection point")
-    plan.sources.foreach { case (handle, source) =>
-      val handleSinks = sinks(handle)
-      require(handleSinks.size == 1, s"PerfCounter exposure route has ${handleSinks.size} sinks, expected one")
-      handleSinks.head := source
-    }
-  }
+  def connect(plan: XSExposurePlan[XSPerfHandle, XSPerfRoute]): Unit = XSExposureBridge.connect(plan, "PerfCounter")
 }
 
 object XSPerfAccumulate extends HasRegularPerfName {
@@ -141,15 +139,15 @@ object XSPerfAccumulate extends HasRegularPerfName {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
       ExposureUtils.expose(
-        XSPerfAccumulateInfo(chisel3.XSCompatibility.currentModule, perfName),
+        XSPerfInfo.Accumulate(chisel3.XSCompatibility.currentModule, perfName),
         isUpward = true,
         perfCnt
       )
     }
   }
 
-  private[utility] def collect(info: XSPerfAccumulateInfo, perfCnt: UInt, ctrl: LogPerfIO)
-                              (implicit p: Parameters): Unit = {
+  def collect(info: XSPerfInfo.Accumulate, perfCnt: UInt, ctrl: LogPerfIO)
+             (implicit p: Parameters): Unit = {
     val perfClean = ctrl.clean
     val perfDump = ctrl.dump
     val counter = RegInit(0.U(64.W)).suggestName(info.perfName + "Counter")
@@ -237,15 +235,15 @@ object XSPerfReference extends HasRegularPerfName {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
       ExposureUtils.expose(
-        XSPerfReferenceInfo(chisel3.XSCompatibility.currentModule, perfName),
+        XSPerfInfo.Reference(chisel3.XSCompatibility.currentModule, perfName),
         isUpward = true,
         perfOut
       )
     }
   }
 
-  private[utility] def collect(info: XSPerfReferenceInfo, perfOut: UInt, ctrl: LogPerfIO)
-                              (implicit p: Parameters): Unit = {
+  def collect(info: XSPerfInfo.Reference, perfOut: UInt, ctrl: LogPerfIO)
+             (implicit p: Parameters): Unit = {
     val perfDump = ctrl.dump
     val valueOut = WireInit(0.U(64.W)).suggestName(info.perfName + "Out")
     valueOut := perfOut
@@ -273,7 +271,7 @@ object XSPerfHistogram extends HasRegularPerfName {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
       ExposureUtils.expose(
-        XSPerfHistogramInfo(
+        XSPerfInfo.Histogram(
           chisel3.XSCompatibility.currentModule,
           perfName,
           start,
@@ -288,8 +286,8 @@ object XSPerfHistogram extends HasRegularPerfName {
     }
   }
 
-  private[utility] def collect(info: XSPerfHistogramInfo, event: XSPerfEvent, ctrl: LogPerfIO)
-                              (implicit p: Parameters): Unit = {
+  def collect(info: XSPerfInfo.Histogram, event: XSPerfEvent, ctrl: LogPerfIO)
+             (implicit p: Parameters): Unit = {
     val perfCnt = event.value
     val enable = event.enable
     val perfClean = ctrl.clean
@@ -363,15 +361,15 @@ object XSPerfMax extends HasRegularPerfName {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfPrint && perfLevel >= p(PerfCounterOptionsKey).perfLevel) {
       ExposureUtils.expose(
-        XSPerfMaxInfo(chisel3.XSCompatibility.currentModule, perfName),
+        XSPerfInfo.Max(chisel3.XSCompatibility.currentModule, perfName),
         isUpward = true,
         XSPerfEvent(perfCnt, enable)
       )
     }
   }
 
-  private[utility] def collect(info: XSPerfMaxInfo, event: XSPerfEvent, ctrl: LogPerfIO)
-                              (implicit p: Parameters): Unit = {
+  def collect(info: XSPerfInfo.Max, event: XSPerfEvent, ctrl: LogPerfIO)
+             (implicit p: Parameters): Unit = {
     val perfCnt = event.value
     val enable = event.enable
     val perfClean = ctrl.clean
