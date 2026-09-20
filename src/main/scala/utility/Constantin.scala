@@ -18,9 +18,15 @@ package utility
 
 import chisel3._
 import chisel3.util._
+import chisel3.properties._
+import chisel3.experimental.paramchoice._
+
+object ConstantinParams {
+  def UIntWidth = 64
+}
 
 trait ConstantinParams {
-  def UIntWidth = 64
+  def UIntWidth = ConstantinParams.UIntWidth
   def getdpicFunc(constName: String) = {
     s"${constName}_constantin_read"
   }
@@ -30,10 +36,9 @@ trait ConstantinParams {
 }
 
 private class SignalReadHelper(constName: String, initValue: BigInt)
-  extends BlackBox with HasBlackBoxInline with ConstantinParams {
-  val io = IO(new Bundle{
-    val value = Output(UInt(UIntWidth.W))
-  })
+  extends FixedIOExtModule(new Bundle {
+    val value = UInt(ConstantinParams.UIntWidth.W)
+  }) with ConstantinParams {
 
   val moduleName = getModuleName(constName)
   val dpicFunc = getdpicFunc(constName)
@@ -97,6 +102,37 @@ object Constantin extends ConstantinParams {
     } else {
       println(s"Constantin fileRead: $constName = $initValue")
       Module(new SignalReadHelper(constName, initValue)).suggestName(s"recordModule_$constName").io.value
+    }
+  }
+
+  case class PerHart()(implicit val domain: HartIdDomain) {
+    def createRecord(
+      constName: String,
+      initValue: Boolean
+    )(implicit select: Property[domain.Case]): UInt = {
+      createRecord(constName, if (initValue) 1 else 0)(select)(0)
+    }
+    
+    def createRecord(
+      constName: String,
+      initValue: BigInt = 0
+    )(implicit select: Property[domain.Case]): UInt = {
+      for (i <- 0 until domain.numHarts) {
+        initMap(s"${constName}_${i}") = initValue
+      }
+
+      if (!Constantin.this.enable) {
+        println(s"Constantin initRead: $constName = $initValue")
+        initValue.U(UIntWidth.W)
+      } else {
+        println(s"Constantin fileRead: $constName = $initValue")
+        val cases = domain.harts.zipWithIndex.map { case (hart, idx) =>
+          hart -> new SignalReadHelper(s"${constName}_${idx}", initValue)
+        }
+        val helperIO = ParamModuleChoice(select, cases.head._2(), cases.tail)
+        helperIO.suggestName(s"recordModule_${constName}")
+        helperIO.value
+      }
     }
   }
 
