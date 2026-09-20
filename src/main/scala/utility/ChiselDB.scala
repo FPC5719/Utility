@@ -19,6 +19,8 @@ package utility
 import chisel3._
 import chisel3.experimental.StringParam
 import chisel3.util._
+import chisel3.properties._
+import chisel3.experimental.paramchoice._
 
 trait HasTableUtils {
   case class RefPort(ref: String, width: Int)
@@ -168,20 +170,16 @@ class Table[T <: Record](val envInFPGA: Boolean, val tableName: String, val hw: 
 }
 
 private class TableWriteHelper[T <: Record](tableName: String, hw: T, site: String)
-    extends BlackBox(
-      Map(
-        "site" -> StringParam(site)
-      )
-    )
-    with HasBlackBoxInline
+    extends FixedIOExtModule(new Bundle {
+      val clock = Input(Clock())
+      val reset = Input(Reset())
+      val en = Input(Bool())
+      val stamp = Input(UInt(64.W))
+      val data = Input(hw.cloneType)
+    }, Map(
+      "site" -> StringParam(site)
+    ))
     with HasTableUtils {
-  val io = IO(new Bundle() {
-    val clock = Input(Clock())
-    val reset = Input(Reset())
-    val en = Input(Bool())
-    val stamp = Input(UInt(64.W))
-    val data = Input(hw.cloneType)
-  })
 
   val moduleName = s"${tableName}Writer"
   val dpicFunc = s"${tableName}_write"
@@ -255,6 +253,71 @@ object ChiselDB {
           s" with different hw types of ${old.hw.getClass} and ${hw.getClass}")
         old.asInstanceOf[Table[T]]
       })
+  }
+
+  trait TablePerHartBase[T <: Record] {
+    def envInFPGA: Boolean
+    def tableName: String
+    def hw: T
+  }
+
+  private val table_hart_map = scala.collection.mutable.Map[String, TablePerHartBase[_]]()
+
+  case class PerHart()(implicit val domain: HartIdDomain) {
+    class TablePerHart[T <: Record](
+      val envInFPGA: Boolean,
+      val tableName: String,
+      val hw: T
+    )(implicit
+      val select: Property[domain.Case]
+    ) extends TablePerHartBase[T] {
+      val table: Seq[Table[T]] = for (i <- 0 until domain.numHarts) yield {
+        new Table(envInFPGA, s"${tableName}_${i}", hw)
+      }
+
+      def log(data: T, en: Bool, site: String = "", clock: Clock, reset: Reset): Unit = {
+        if(!envInFPGA){
+          val cases = domain.harts.zipWithIndex.map { case (hart, idx) =>
+            (hart, () => new TableWriteHelper[T](s"${tableName}_${idx}", hw, site))
+          }
+          val writer = ParamModuleChoice(select, cases.head._2(), cases.tail)
+          val cnt = RegInit(0.U(64.W))
+          cnt := cnt + 1.U
+          writer.clock := clock
+          writer.reset := reset
+          writer.en := en
+          writer.stamp := cnt
+          writer.data := data
+        }
+      }
+
+      def log(data: Valid[T], site: String, clock: Clock, reset: Reset): Unit = {
+        log(data.bits, data.valid, site, clock, reset)
+      }
+
+      def log(data: DecoupledIO[T], site: String, clock: Clock, reset: Reset): Unit = {
+        log(data.bits, data.fire, site, clock, reset)
+      }
+    }
+
+    def createTable[T <: Record](
+      tableName: String,
+      hw: T,
+      basicDB: Boolean = false
+    )(implicit select: Property[_ <: ChoiceCase]): TablePerHart[T] = {
+      table_hart_map.get(tableName).map { old =>
+        require(old.hw.getClass.equals(hw.getClass), s"table name conflict: $tableName" +
+          s" with different hw types of ${old.hw.getClass} and ${hw.getClass}")
+        old.asInstanceOf[TablePerHart[T]]
+      }.getOrElse {
+        val t = new TablePerHart[T](!(basicDB & ChiselDB.this.enable), tableName, hw)(
+          select.asInstanceOf[Property[domain.Case]]
+        )
+        table_hart_map += (tableName -> t)
+        table_map ++= t.table.map(x => x.tableName -> x)
+        t
+      }
+    }
   }
 
   def getCHeader: String = {
