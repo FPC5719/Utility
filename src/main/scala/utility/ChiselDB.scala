@@ -268,9 +268,7 @@ object ChiselDB {
       val envInFPGA: Boolean,
       val tableName: String,
       val hw: T
-    )(implicit
-      val select: Property[domain.Case]
-    ) extends TablePerHartBase[T] {
+    )(implicit val select: Property[domain.Case]) extends TablePerHartBase[T] {
       val table: Seq[Table[T]] = for (i <- 0 until domain.numHarts) yield {
         new Table(envInFPGA, s"${tableName}_${i}", hw)
       }
@@ -304,15 +302,13 @@ object ChiselDB {
       tableName: String,
       hw: T,
       basicDB: Boolean = false
-    )(implicit select: Property[_ <: ChoiceCase]): TablePerHart[T] = {
+    )(implicit select: Property[domain.Case]): TablePerHart[T] = {
       table_hart_map.get(tableName).map { old =>
         require(old.hw.getClass.equals(hw.getClass), s"table name conflict: $tableName" +
           s" with different hw types of ${old.hw.getClass} and ${hw.getClass}")
         old.asInstanceOf[TablePerHart[T]]
       }.getOrElse {
-        val t = new TablePerHart[T](!(basicDB & ChiselDB.this.enable), tableName, hw)(
-          select.asInstanceOf[Property[domain.Case]]
-        )
+        val t = new TablePerHart[T](!(basicDB & ChiselDB.this.enable), tableName, hw)
         table_hart_map += (tableName -> t)
         table_map ++= t.table.map(x => x.tableName -> x)
         t
