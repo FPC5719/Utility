@@ -18,8 +18,10 @@ package utility
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental.annotate
 import chisel3.properties._
 import chisel3.experimental.paramchoice._
+import firrtl.transforms.NoDedupAnnotation
 
 object ConstantinParams {
   def UIntWidth = 64
@@ -39,6 +41,11 @@ private class SignalReadHelper(constName: String, initValue: BigInt)
   extends FixedIOExtModule(new Bundle {
     val value = UInt(ConstantinParams.UIntWidth.W)
   }) with ConstantinParams {
+
+  // Readers are candidates of a parameterized instance choice. Dedup rewrites structurally equal
+  // candidates across harts and that leaves an inner symbol on the choice op, which
+  // `firrtl.param_instance_choice` rejects. Keep them out of dedup.
+  annotate(this)(Seq(NoDedupAnnotation(this.toTarget)))
 
   val moduleName = getModuleName(constName)
   val dpicFunc = getdpicFunc(constName)
@@ -109,14 +116,14 @@ object Constantin extends ConstantinParams {
     def createRecord(
       constName: String,
       initValue: Boolean
-    )(implicit select: Property[domain.Case]): UInt = {
+    )(implicit select: Property[_ <: ChoiceCase]): Bool = {
       createRecord(constName, if (initValue) 1 else 0)(select)(0)
     }
-    
+
     def createRecord(
       constName: String,
       initValue: BigInt = 0
-    )(implicit select: Property[domain.Case]): UInt = {
+    )(implicit select: Property[_ <: ChoiceCase]): UInt = {
       for (i <- 0 until domain.numHarts) {
         initMap(s"${constName}_${i}") = initValue
       }
@@ -129,7 +136,7 @@ object Constantin extends ConstantinParams {
         val cases = domain.harts.zipWithIndex.map { case (hart, idx) =>
           hart -> new SignalReadHelper(s"${constName}_${idx}", initValue)
         }
-        val helperIO = ParamModuleChoice(select, cases.head._2(), cases.tail)
+        val helperIO = ParamModuleChoice(select.asInstanceOf[Property[ChoiceCase]], cases.head._2(), cases.tail)
         helperIO.suggestName(s"recordModule_${constName}")
         helperIO.value
       }

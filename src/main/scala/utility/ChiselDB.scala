@@ -17,10 +17,12 @@
 package utility
 
 import chisel3._
+import chisel3.experimental.annotate
 import chisel3.experimental.StringParam
 import chisel3.util._
 import chisel3.properties._
 import chisel3.experimental.paramchoice._
+import firrtl.transforms.NoDedupAnnotation
 
 trait HasTableUtils {
   case class RefPort(ref: String, width: Int)
@@ -181,6 +183,9 @@ private class TableWriteHelper[T <: Record](tableName: String, hw: T, site: Stri
     ))
     with HasTableUtils {
 
+  // Candidates of a parameterized instance choice must stay out of dedup; see Constantin.scala.
+  annotate(this)(Seq(NoDedupAnnotation(this.toTarget)))
+
   val moduleName = s"${tableName}Writer"
   val dpicFunc = s"${tableName}_write"
 
@@ -268,17 +273,27 @@ object ChiselDB {
       val envInFPGA: Boolean,
       val tableName: String,
       val hw: T
-    )(implicit val select: Property[domain.Case]) extends TablePerHartBase[T] {
+    ) extends TablePerHartBase[T] {
       val table: Seq[Table[T]] = for (i <- 0 until domain.numHarts) yield {
         new Table(envInFPGA, s"${tableName}_${i}", hw)
       }
 
-      def log(data: T, en: Bool, site: String = "", clock: Clock, reset: Reset): Unit = {
+      // The selector must be supplied at each `log` call, not captured at `createTable` time:
+      // tables are cached globally by name, so a cached table is reused when a second hart
+      // elaborates the same module. Capturing the first hart's selector would reference that
+      // hart's port from the other hart's module body.
+      def log(
+        data: T,
+        en: Bool,
+        site: String = "",
+        clock: Clock,
+        reset: Reset
+      )(implicit select: Property[_ <: ChoiceCase]): Unit = {
         if(!envInFPGA){
           val cases = domain.harts.zipWithIndex.map { case (hart, idx) =>
             (hart, () => new TableWriteHelper[T](s"${tableName}_${idx}", hw, site))
           }
-          val writer = ParamModuleChoice(select, cases.head._2(), cases.tail)
+          val writer = ParamModuleChoice(select.asInstanceOf[Property[ChoiceCase]], cases.head._2(), cases.tail)
           val cnt = RegInit(0.U(64.W))
           cnt := cnt + 1.U
           writer.clock := clock
@@ -289,11 +304,15 @@ object ChiselDB {
         }
       }
 
-      def log(data: Valid[T], site: String, clock: Clock, reset: Reset): Unit = {
+      def log(data: Valid[T], site: String, clock: Clock, reset: Reset)(
+        implicit select: Property[_ <: ChoiceCase]
+      ): Unit = {
         log(data.bits, data.valid, site, clock, reset)
       }
 
-      def log(data: DecoupledIO[T], site: String, clock: Clock, reset: Reset): Unit = {
+      def log(data: DecoupledIO[T], site: String, clock: Clock, reset: Reset)(
+        implicit select: Property[_ <: ChoiceCase]
+      ): Unit = {
         log(data.bits, data.fire, site, clock, reset)
       }
     }
@@ -302,7 +321,7 @@ object ChiselDB {
       tableName: String,
       hw: T,
       basicDB: Boolean = false
-    )(implicit select: Property[domain.Case]): TablePerHart[T] = {
+    ): TablePerHart[T] = {
       table_hart_map.get(tableName).map { old =>
         require(old.hw.getClass.equals(hw.getClass), s"table name conflict: $tableName" +
           s" with different hw types of ${old.hw.getClass} and ${hw.getClass}")
