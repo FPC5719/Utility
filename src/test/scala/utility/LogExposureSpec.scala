@@ -41,8 +41,7 @@ class LogExposureSpec extends AnyFlatSpec with Matchers {
       PerfCounterOptions(
         enablePerfPrint = false,
         enablePerfDB = false,
-        perfLevel = XSPerfLevel.VERBOSE,
-        perfDBHartID = 0
+        perfLevel = XSPerfLevel.VERBOSE
       )
     case LogUtilsOptionsKey =>
       LogUtilsOptions(

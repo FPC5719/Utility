@@ -20,6 +20,8 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.experimental.ExposureUtils
 import chisel3.experimental.BaseModule
+import chisel3.properties._
+import chisel3.experimental.paramchoice.{ChoiceCase}
 import org.chipsalliance.cde.config.{Field, Parameters}
 
 import XSPerfLevel.XSPerfLevel
@@ -29,8 +31,7 @@ case class PerfCounterOptions
 (
   enablePerfPrint: Boolean,
   enablePerfDB: Boolean,
-  perfLevel: XSPerfLevel,
-  perfDBHartID: Int
+  perfLevel: XSPerfLevel
 )
 
 object XSPerfLevel extends Enumeration {
@@ -448,6 +449,11 @@ object TransactionLatencyCounter {
 
 object XSPerfRolling extends HasRegularPerfName {
 
+  /** The hart is selected at log time, so the emitted names stay `<perfName>_rolling_<hart>` (which
+    * `scripts/rolling.py` parses) even when the enclosing module body is shared between harts. */
+  private def createRollingTable(perfName: String)(implicit p: Parameters, select: Property[_ <: ChoiceCase]) =
+    ChiselDB.PerHart()(p(XSHartIdDomainKey)).createTable(perfName + "_rolling", new RollingEntry(), basicDB = true)
+
   class RollingEntry()(implicit p: Parameters) extends Bundle {
     val xAxisPt = UInt(64.W)
     val yAxisPt = UInt(64.W)
@@ -466,11 +472,10 @@ object XSPerfRolling extends HasRegularPerfName {
     granularity: Int,
     clock: Clock,
     reset: Reset
-  )(implicit p: Parameters): Unit = {
+  )(implicit p: Parameters, select: Property[_ <: ChoiceCase]): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfDB) {
-      val tableName = perfName + "_rolling_" + p(PerfCounterOptionsKey).perfDBHartID.toString
-      val rollingTable = ChiselDB.createTable(tableName, new RollingEntry(), basicDB=true)
+      val rollingTable = createRollingTable(perfName)
 
       val xAxisCnt = RegInit(0.U(64.W))
       val yAxisCnt = RegInit(0.U(64.W))
@@ -498,11 +503,10 @@ object XSPerfRolling extends HasRegularPerfName {
     granularity: Int,
     clock: Clock,
     reset: Reset
-  )(implicit p: Parameters): Unit = {
+  )(implicit p: Parameters, select: Property[_ <: ChoiceCase]): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfDB) {
-      val tableName = perfName + "_rolling_" + p(PerfCounterOptionsKey).perfDBHartID.toString
-      val rollingTable = ChiselDB.createTable(tableName, new RollingEntry(), basicDB=true)
+      val rollingTable = createRollingTable(perfName)
 
       val xAxisCnt = RegInit(0.U(64.W))
       val yAxisCnt = RegInit(0.U(64.W))
@@ -532,11 +536,10 @@ object XSPerfRolling extends HasRegularPerfName {
     eventTrigger: UInt,
     clock: Clock,
     reset: Reset
-  )(implicit p: Parameters): Unit = {
+  )(implicit p: Parameters, select: Property[_ <: ChoiceCase]): Unit = {
     judgeName(perfName)
     if (p(PerfCounterOptionsKey).enablePerfDB) {
-      val tableName = perfName + "_rolling_" + p(PerfCounterOptionsKey).perfDBHartID.toString
-      val rollingTable = ChiselDB.createTable(tableName, new RollingEntry(), basicDB=true)
+      val rollingTable = createRollingTable(perfName)
 
       val xAxisCnt = RegInit(0.U(64.W))
       val yAxisCnt = RegInit(0.U(64.W))
@@ -590,7 +593,7 @@ object XSPerfSeqRolling {
     granularity: Int,
     clock: Clock,
     reset: Reset
-  )(implicit p: Parameters): Unit = {
+  )(implicit p: Parameters, select: Property[_ <: ChoiceCase]): Unit = {
     foreachPerfCnt(perfNamePrefix, perfValid, perfCntSeq) { case (name, perfCnt) =>
       XSPerfRolling(name, perfCnt, granularity, clock, reset)
     }
@@ -607,7 +610,7 @@ object XSPerfSeqRolling {
     granularity: Int,
     clock: Clock,
     reset: Reset
-  )(implicit p: Parameters): Unit = {
+  )(implicit p: Parameters, select: Property[_ <: ChoiceCase]): Unit = {
     foreachPerfCnt(perfNamePrefix, perfValid, perfCntSeq) { case (name, perfCnt) =>
       XSPerfRolling(name, perfCnt, eventTrigger, granularity, clock, reset)
     }

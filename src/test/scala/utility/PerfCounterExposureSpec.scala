@@ -40,8 +40,7 @@ class PerfCounterExposureSpec extends AnyFlatSpec with Matchers {
       PerfCounterOptions(
         enablePerfPrint = true,
         enablePerfDB = false,
-        perfLevel = XSPerfLevel.VERBOSE,
-        perfDBHartID = 0
+        perfLevel = XSPerfLevel.VERBOSE
       )
     case LogUtilsOptionsKey =>
       LogUtilsOptions(
